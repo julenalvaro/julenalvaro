@@ -444,6 +444,18 @@
     font: inherit;
     text-align: center;
   }
+  .reg-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .reg-chips button {
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--ink);
+    border-radius: 999px;
+    padding: 7px 13px;
+    font: inherit;
+    font-size: 0.88rem;
+    cursor: pointer;
+  }
+  .reg-chips button.off { opacity: 0.35; }
   .win-box { text-align: center; }
   .win-box h2 { font-size: 2.6rem; margin: 0; }
   .win-box p { font-size: 1.15rem; color: var(--ink); }
@@ -477,7 +489,6 @@
       <button class="ko" id="accFalla" type="button">✘ Falla</button>
       <button class="skip" id="accPasa" type="button">Pasa</button>
     </div>
-    <div class="rebote" id="rebote" hidden></div>
   </div>
 
   <div class="controls">
@@ -490,6 +501,7 @@
 
   <div class="footer-row">
     <button id="editPlayers">Jugadores</button>
+    <button id="regBtn">Jugadas</button>
     <button id="corregir">Corregir puntos</button>
     <button id="shuffle">Barajar de nuevo</button>
   </div>
@@ -519,6 +531,18 @@
       <button id="resetScores" hidden>Puntos a cero</button>
       <button id="endGame" hidden>Terminar partida</button>
       <button id="histBtn" hidden>Historial</button>
+    </div>
+  </div>
+</div>
+
+<div class="setup" id="reg" hidden>
+  <div class="setup-box">
+    <h2>Jugadas de la partida</h2>
+    <p class="online-hint">Toca un nombre para corregir su resultado (✔ → ✘ → — → ✔): los puntos se recalculan al momento. «Deshacer última» retrocede a la pregunta anterior.</p>
+    <div class="hist-list" id="regList"></div>
+    <div class="setup-actions">
+      <button id="regDeshacer">↩ Deshacer última</button>
+      <button class="start" id="regClose">Volver al juego</button>
     </div>
   </div>
 </div>
@@ -1913,6 +1937,7 @@ function render() {
 }
 
 function move(delta) {
+  if (typeof activa !== "undefined" && activa) { activa = null; recomputar(); } // navegar a mano cancela la jugada a medias
   pos = (pos + delta + filtered.length) % filtered.length;
   revealed = false;
   render();
@@ -1996,11 +2021,9 @@ function renderScores() {
       b.className = delta > 0 ? "plus" : "minus";
       b.setAttribute("aria-label", `${label} para ${p.name}`);
       b.addEventListener("click", () => {
-        p.score = Math.round((p.score + delta) * 10) / 10;
-        savePlayers();
-        renderScores();
-        if (sala) pushScore(p);
-        checkMeta(p);
+        registro.push({ tipo: "ajuste", jugador: p.name, delta });
+        guardarRegistro();
+        recomputar();
       });
       btns.append(b);
     }
@@ -2090,31 +2113,83 @@ document.getElementById("nameInput").addEventListener("keydown", e => {
 });
 document.getElementById("startGame").addEventListener("click", closeSetup);
 document.getElementById("resetScores").addEventListener("click", () => {
+  registro = [];
+  guardarRegistro();
   players.forEach(p => p.score = 0);
   metaAvisada = false;
   renderChips();
 });
 document.getElementById("editPlayers").addEventListener("click", openSetup);
 
-// ——— Modo por turnos ———
-const PUNTOS = { acierto: 1, fallo: -0.5, pasa: 0, rebote: 0.5 };
+// ——— Modo por turnos con registro de jugadas ———
+// Puntuación: acierto +1 · acierto de rebote +0,5 · fallo −1 (siempre) · pasa 0
+const PUNTOS = { acierto: 1, rebote: 0.5, fallo: -1, pasa: 0 };
 let turnIdx = 0;
 try { turnIdx = parseInt(localStorage.getItem("trivialMarcadorTurno")) || 0; } catch (e) {}
-let eventos = [];
-try { eventos = JSON.parse(localStorage.getItem("trivialMarcadorEventos") || "[]"); } catch (e) {}
-let pendiente = null; // jugada esperando el rebote
+let registro = []; // historial de jugadas de la partida en curso: editable, los puntos salen de aquí
+try { registro = JSON.parse(localStorage.getItem("trivialMarcadorRegistro") || "[]"); } catch (e) {}
+let activa = null; // pregunta a medio resolver: {qIdx, pos, cat, orden, acciones, turnoInicial}
 
 function jugadorEnTurno() { return players[turnIdx % players.length]; }
 function guardarTurno() { try { localStorage.setItem("trivialMarcadorTurno", String(turnIdx)); } catch (e) {} }
-function guardarEventos() { try { localStorage.setItem("trivialMarcadorEventos", JSON.stringify(eventos.slice(-2000))); } catch (e) {} }
+function guardarRegistro() { try { localStorage.setItem("trivialMarcadorRegistro", JSON.stringify(registro.slice(-300))); } catch (e) {} }
+const rnd1 = n => Math.round(n * 10) / 10;
 
-function aplicarDelta(p, delta) {
-  if (!delta) return;
-  p.score = Math.round((p.score + delta) * 10) / 10;
+function deltaDe(accion, esRebote) {
+  if (accion === "acierto") return esRebote ? PUNTOS.rebote : PUNTOS.acierto;
+  if (accion === "fallo") return PUNTOS.fallo;
+  return 0;
+}
+
+// Recorre una jugada aplicando la regla: la cadena termina en el primer acierto
+function recorrerJugada(e, fn) {
+  let cerrada = false;
+  e.orden.forEach((n, i) => {
+    if (cerrada) return;
+    const a = e.acciones[i];
+    if (a == null) return;
+    fn(n, a, i > 0);
+    if (a === "acierto") cerrada = true;
+  });
+}
+
+function calcularMapa() {
+  const base = new Map(players.map(p => [p.name, 0]));
+  const suma = (n, d) => { if (base.has(n)) base.set(n, rnd1(base.get(n) + d)); };
+  const entradas = activa ? registro.concat([activa]) : registro;
+  for (const e of entradas) {
+    if (e.tipo === "ajuste") { suma(e.jugador, e.delta); continue; }
+    recorrerJugada(e, (n, a, esRebote) => suma(n, deltaDe(a, esRebote)));
+  }
+  return base;
+}
+
+function recomputar() {
+  const antes = new Map(players.map(p => [p.name, p.score]));
+  const base = calcularMapa();
+  for (const p of players) if (base.has(p.name)) p.score = base.get(p.name);
   savePlayers();
   renderScores();
-  if (sala) pushScore(p);
-  checkMeta(p);
+  if (sala) for (const p of players) if (antes.get(p.name) !== p.score) pushScore(p);
+  for (const p of players) checkMeta(p);
+}
+
+// Si los puntos actuales no salen del registro (p. ej. al entrar en una sala con
+// tanteo ya empezado), se añade un ajuste de arranque para no perderlos.
+function asegurarBaseline() {
+  const activaAntes = activa;
+  activa = null;
+  const base = calcularMapa();
+  activa = activaAntes;
+  let cambio = false;
+  for (const p of players) {
+    const calc = base.get(p.name) ?? 0;
+    if (calc !== p.score) {
+      registro.push({ tipo: "ajuste", jugador: p.name, delta: rnd1(p.score - calc), arranque: true });
+      cambio = true;
+    }
+  }
+  if (cambio) guardarRegistro();
 }
 
 // ——— Puntuación objetivo ———
@@ -2151,91 +2226,161 @@ document.getElementById("winGuardar").addEventListener("click", async () => {
   if (sala) {
     await terminarPartida();
   } else {
+    registro = [];
+    guardarRegistro();
     players.forEach(p => p.score = 0);
     savePlayers();
     renderScores();
   }
 });
 
-function registrarEvento(jugador, resultado, rebote) {
-  const ev = {
-    fecha: new Date().toISOString(),
-    jugador,
-    categoria: CATS[Q[filtered[pos]][0]].name,
-    resultado,
-    rebote: rebote || null,
-  };
-  eventos.push(ev);
-  guardarEventos();
-  if (sala) {
-    api("eventos", { method: "POST", body: JSON.stringify({ sala, jugador: ev.jugador, categoria: ev.categoria, resultado: ev.resultado, rebote: ev.rebote }) }).catch(() => {});
-  }
+function ordenDesde(idx) {
+  const n = players.length;
+  return Array.from({ length: n }, (_, k) => players[(idx + k) % n].name);
 }
 
-function resolver(resultado) {
+// Un toque por jugador: el titular responde y, si falla o pasa, el rebote va
+// rotando en el orden de asiento; cada uno puede acertar, fallar o pasar.
+function resolver(accion) {
   if (players.length === 0) return;
-  const jug = jugadorEnTurno();
-  aplicarDelta(jug, PUNTOS[resultado]);
-  if (resultado === "acierto") {
-    registrarEvento(jug.name, "acierto", null);
-    avanzar();
+  if (!activa) {
+    activa = {
+      qIdx: filtered[pos],
+      pos,
+      cat: CATS[Q[filtered[pos]][0]].name,
+      orden: ordenDesde(turnIdx % players.length),
+      acciones: [],
+      turnoInicial: turnIdx,
+    };
+  }
+  activa.acciones.push(accion);
+  const cerrada = accion === "acierto" || activa.acciones.length >= activa.orden.length;
+  if (cerrada) {
+    while (activa.acciones.length < activa.orden.length) activa.acciones.push(null);
+    registro.push({ qIdx: activa.qIdx, pos: activa.pos, cat: activa.cat, orden: activa.orden, acciones: activa.acciones, turnoInicial: activa.turnoInicial });
+    guardarRegistro();
+    activa = null;
+    recomputar();
+    turnIdx++;
+    guardarTurno();
+    move(1);
   } else {
-    pendiente = { jugador: jug.name, resultado };
-    mostrarRebote(jug.name);
+    recomputar(); // refleja en vivo el −1 o el pase mientras sigue el rebote
+    actualizarTurnoUI();
   }
 }
 
-function mostrarRebote(titular) {
-  const box = document.getElementById("rebote");
-  box.textContent = "";
-  const label = document.createElement("span");
-  label.textContent = `¿Alguien la caza al rebote? (+${fmtScore(PUNTOS.rebote)})`;
-  box.append(label);
-  for (const p of players) {
-    if (p.name === titular) continue;
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = p.name;
-    b.addEventListener("click", () => cerrarRebote(p));
-    box.append(b);
+function deshacerUltima() {
+  if (activa) { activa = null; recomputar(); actualizarTurnoUI(); renderRegistro(); return; }
+  const e = registro.pop();
+  if (!e) return;
+  guardarRegistro();
+  recomputar();
+  if (e.tipo !== "ajuste") {
+    turnIdx = e.turnoInicial;
+    guardarTurno();
+    if (typeof e.pos === "number" && e.pos < filtered.length) pos = e.pos;
+    revealed = false;
+    render();
   }
-  const nadie = document.createElement("button");
-  nadie.type = "button";
-  nadie.className = "nadie";
-  nadie.textContent = "Nadie";
-  nadie.addEventListener("click", () => cerrarRebote(null));
-  box.append(nadie);
-  document.getElementById("acciones").hidden = true;
-  box.hidden = false;
+  renderRegistro();
 }
 
-function cerrarRebote(p) {
-  if (p) aplicarDelta(p, PUNTOS.rebote);
-  registrarEvento(pendiente.jugador, pendiente.resultado, p ? p.name : null);
-  pendiente = null;
-  avanzar();
-}
+const SIMBOLO = { acierto: "✔", fallo: "✘", pasa: "—" };
+const CICLO = { acierto: "fallo", fallo: "pasa", pasa: "acierto" };
 
-function avanzar() {
-  turnIdx++;
-  guardarTurno();
-  document.getElementById("rebote").hidden = true;
-  move(1); // siguiente pregunta: oculta respuesta y refresca el turno
+function renderRegistro() {
+  const list = document.getElementById("regList");
+  list.textContent = "";
+  if (registro.length === 0) {
+    const p = document.createElement("p");
+    p.className = "hist-empty";
+    p.textContent = "Aún no hay jugadas en esta partida.";
+    list.append(p);
+    return;
+  }
+  registro.slice().reverse().forEach((e, ridx) => {
+    const idxReal = registro.length - 1 - ridx;
+    const div = document.createElement("div");
+    div.className = "hist-game";
+    if (e.tipo === "ajuste") {
+      const linea = document.createElement("span");
+      linea.textContent = `${e.arranque ? "Tanteo inicial" : "Ajuste manual"}: ${e.jugador} ${e.delta > 0 ? "+" : ""}${fmtScore(e.delta)}`;
+      const quitar = document.createElement("button");
+      quitar.type = "button";
+      quitar.textContent = "✕ quitar";
+      quitar.addEventListener("click", () => {
+        registro.splice(idxReal, 1);
+        guardarRegistro();
+        recomputar();
+        renderRegistro();
+      });
+      const chips = document.createElement("div");
+      chips.className = "reg-chips";
+      chips.append(quitar);
+      div.append(linea, chips);
+    } else {
+      const cab = document.createElement("span");
+      cab.className = "fecha";
+      cab.textContent = `Jugada ${idxReal + 1} · ${e.cat}`;
+      const chips = document.createElement("div");
+      chips.className = "reg-chips";
+      // Qué posiciones puntúan realmente (la cadena muere en el primer acierto)
+      let corte = e.acciones.findIndex(a => a === "acierto");
+      if (corte === -1) corte = e.orden.length;
+      e.orden.forEach((nombre, i) => {
+        const a = e.acciones[i];
+        const b = document.createElement("button");
+        b.type = "button";
+        if (a == null) {
+          b.textContent = `${nombre} ·`;
+          b.className = "off";
+          b.disabled = true;
+        } else {
+          b.textContent = `${nombre} ${SIMBOLO[a]}${a === "acierto" && i > 0 ? "½" : ""}`;
+          if (i > corte) b.className = "off"; // ya no cuenta: la cazó alguien antes
+          b.addEventListener("click", () => {
+            e.acciones[i] = CICLO[a];
+            guardarRegistro();
+            recomputar();
+            renderRegistro();
+          });
+        }
+        chips.append(b);
+      });
+      div.append(cab, chips);
+    }
+    list.append(div);
+  });
 }
 
 function actualizarTurnoUI() {
   const hay = players.length > 0;
   const box = document.getElementById("turno");
   box.hidden = !hay;
-  if (hay) document.getElementById("turnoNombre").textContent = jugadorEnTurno().name;
+  if (hay) {
+    const enCadena = activa && activa.acciones.length > 0;
+    box.firstChild.textContent = enCadena ? `Rebote (+${fmtScore(PUNTOS.rebote)}) para ` : "Pregunta para ";
+    document.getElementById("turnoNombre").textContent = enCadena
+      ? activa.orden[activa.acciones.length]
+      : jugadorEnTurno().name;
+    document.getElementById("pasarTurno").hidden = enCadena;
+  }
   document.getElementById("acciones").hidden = !(revealed && hay);
-  if (!revealed) { document.getElementById("rebote").hidden = true; pendiente = null; }
 }
 
 document.getElementById("accAcierta").addEventListener("click", () => resolver("acierto"));
 document.getElementById("accFalla").addEventListener("click", () => resolver("fallo"));
 document.getElementById("accPasa").addEventListener("click", () => resolver("pasa"));
 document.getElementById("pasarTurno").addEventListener("click", () => { turnIdx++; guardarTurno(); actualizarTurnoUI(); });
+document.getElementById("regBtn").addEventListener("click", () => {
+  renderRegistro();
+  document.getElementById("reg").hidden = false;
+});
+document.getElementById("regClose").addEventListener("click", () => {
+  document.getElementById("reg").hidden = true;
+});
+document.getElementById("regDeshacer").addEventListener("click", deshacerUltima);
 document.getElementById("corregir").addEventListener("click", () => {
   const activo = document.body.classList.toggle("corrigiendo");
   document.getElementById("corregir").textContent = activo ? "Ocultar corrección" : "Corregir puntos";
@@ -2298,6 +2443,7 @@ async function unirseSala(codigo) {
 function entrarEnSala(codigo) {
   sala = codigo;
   try { localStorage.setItem("trivialMarcadorSala", codigo); } catch (e) {}
+  asegurarBaseline();
   savePlayers();
   const badge = document.getElementById("salaBadge");
   badge.textContent = "SALA " + codigo;
@@ -2365,6 +2511,15 @@ async function terminarPartida() {
   const resultados = players.map(p => ({ nombre: p.name, puntos: p.score, ganador: p.score === max }));
   try {
     await api("partidas", { method: "POST", body: JSON.stringify({ sala, resultados }) });
+    // Volcar las jugadas (ya corregidas) para las estadísticas
+    const filas = [];
+    for (const e of registro) {
+      if (e.tipo === "ajuste") continue;
+      recorrerJugada(e, (n, a, esRebote) => filas.push({ sala, jugador: n, categoria: e.cat, resultado: a, rebote: esRebote ? "rebote" : null }));
+    }
+    if (filas.length) await api("eventos", { method: "POST", body: JSON.stringify(filas) }).catch(() => {});
+    registro = [];
+    guardarRegistro();
     for (const p of players) { p.score = 0; await pushScore(p); }
     metaAvisada = false;
     savePlayers();
@@ -2415,26 +2570,27 @@ async function abrirHistorial() {
         rankBox.append(row);
       });
     }
-    // Estadísticas por jugador a partir de las jugadas registradas
-    let evs = eventos;
+    // Estadísticas por jugador: las de la nube (partidas cerradas) + la partida en curso
+    let evs = [];
     try {
-      const remotos = await api(`eventos?sala=eq.${sala}&select=jugador,categoria,resultado,rebote&order=fecha.desc&limit=2000`);
-      if (remotos && remotos.length) evs = remotos;
-    } catch (e) { /* sin tabla o sin conexión: usamos las jugadas locales */ }
+      const remotos = await api(`eventos?sala=eq.${sala}&select=jugador,categoria,resultado,rebote&limit=4000`);
+      if (remotos) evs = remotos;
+    } catch (e) { /* sin conexión: solo la partida en curso */ }
+    for (const e of registro) {
+      if (e.tipo === "ajuste") continue;
+      recorrerJugada(e, (n, a, esRebote) => evs.push({ jugador: n, categoria: e.cat, resultado: a, rebote: esRebote ? "rebote" : null }));
+    }
     const statsBox = document.getElementById("statsBox");
     statsBox.textContent = "";
     const st = new Map();
-    const dame = n => { if (!st.has(n)) st.set(n, { a: 0, f: 0, p: 0, r: 0, cats: new Map() }); return st.get(n); };
+    const dame = n => { if (!st.has(n)) st.set(n, { a: 0, r: 0, f: 0, p: 0, cats: new Map() }); return st.get(n); };
     for (const e of evs) {
       const s = dame(e.jugador);
-      if (e.resultado === "acierto") { s.a++; s.cats.set(e.categoria, (s.cats.get(e.categoria) || 0) + 1); }
-      else if (e.resultado === "fallo") s.f++;
+      if (e.resultado === "acierto") {
+        if (e.rebote) s.r++; else s.a++;
+        s.cats.set(e.categoria, (s.cats.get(e.categoria) || 0) + 1);
+      } else if (e.resultado === "fallo") s.f++;
       else s.p++;
-      if (e.rebote) {
-        const rs = dame(e.rebote);
-        rs.r++;
-        rs.cats.set(e.categoria, (rs.cats.get(e.categoria) || 0) + 1);
-      }
     }
     document.getElementById("statsTitle").hidden = st.size === 0;
     for (const [nombre, s] of [...st.entries()].sort((x, y) => (y[1].a + y[1].r) - (x[1].a + x[1].r))) {
@@ -2444,7 +2600,7 @@ async function abrirHistorial() {
       const izq = document.createElement("span");
       izq.textContent = nombre;
       const der = document.createElement("span");
-      der.textContent = `${s.a}✔ ${s.f}✘ · ${s.p} ${s.p === 1 ? "pase" : "pases"} · ${s.r} ${s.r === 1 ? "rebote" : "rebotes"}` + (mejor ? ` · fuerte en ${mejor[0]}` : "");
+      der.textContent = `${s.a}✔ ${s.r}✔½ ${s.f}✘ · ${s.p} ${s.p === 1 ? "pase" : "pases"}` + (mejor ? ` · fuerte en ${mejor[0]}` : "");
       row.append(izq, der);
       statsBox.append(row);
     }
@@ -2498,7 +2654,7 @@ function initOnlineUI() {
 }
 
 // Ganchos para pruebas automatizadas
-window._trivial = { crearSala, unirseSala, terminarPartida, sincronizar, initOnlineUI, get players() { return players; }, get sala() { return sala; } };
+window._trivial = { crearSala, unirseSala, terminarPartida, sincronizar, initOnlineUI, resolver, deshacerUltima, get players() { return players; }, get sala() { return sala; }, get registro() { return registro; } };
 
 shuffle(order);
 applyFilter();
@@ -2511,6 +2667,7 @@ if (players.length === 0) {
   renderScores();
 }
 actualizarTurnoUI();
+asegurarBaseline();
 if (meta) document.getElementById("metaInput").value = meta;
 initOnlineUI();
 </script>
