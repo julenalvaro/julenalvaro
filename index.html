@@ -317,6 +317,41 @@
     color: var(--cie);
   }
   .setup-actions .start:disabled { opacity: 0.45; cursor: default; }
+  .salaBadge {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--cie);
+    border: 1px solid var(--cie);
+    border-radius: 999px;
+    padding: 2px 10px;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  .online { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .online-title { margin: 0; font-weight: 600; font-size: 0.95rem; }
+  .online-state { font-weight: 400; color: var(--ink-soft); font-size: 0.85rem; }
+  .online-hint { margin: 0; color: var(--ink-soft); font-size: 0.82rem; line-height: 1.4; }
+  .hist-rank {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .hist-rank .row, .hist-game {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 0.92rem;
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .hist-game { flex-direction: column; gap: 4px; }
+  .hist-game .fecha { color: var(--ink-soft); font-size: 0.8rem; }
+  .hist-list { display: flex; flex-direction: column; gap: 8px; max-height: 40vh; overflow-y: auto; }
+  .hist-empty { color: var(--ink-soft); font-size: 0.9rem; margin: 0; }
 </style>
 
 <div class="wrap">
@@ -324,7 +359,7 @@
     <h1>Trivial Exprés
       <span class="dots"><span style="background:var(--geo)"></span><span style="background:var(--his)"></span><span style="background:var(--cie)"></span><span style="background:var(--dep)"></span><span style="background:var(--cin)"></span><span style="background:var(--lit)"></span></span>
     </h1>
-    <div class="counter" id="counter"></div>
+    <div class="counter"><span class="salaBadge" id="salaBadge" hidden></span><span id="counter"></span></div>
   </header>
 
   <div class="filters" id="filters">
@@ -366,9 +401,31 @@
       <button id="addPlayer">Añadir</button>
     </div>
     <div class="chiplist" id="chiplist"></div>
+    <div class="online" id="onlineBox" hidden>
+      <p class="online-title">Sala compartida <span class="online-state" id="onlineState"></span></p>
+      <div class="addrow">
+        <input id="roomInput" type="text" maxlength="8" placeholder="Código, p. ej. GOYE" autocomplete="off" style="text-transform:uppercase">
+        <button id="joinRoom">Entrar</button>
+        <button id="createRoom">Crear</button>
+      </div>
+      <p class="online-hint">Uno crea la sala y el resto entra con el mismo código: el marcador se sincroniza en todos los móviles.</p>
+    </div>
     <div class="setup-actions">
       <button class="start" id="startGame" disabled>Empezar</button>
       <button id="resetScores" hidden>Puntos a cero</button>
+      <button id="endGame" hidden>Terminar partida</button>
+      <button id="histBtn" hidden>Historial</button>
+    </div>
+  </div>
+</div>
+
+<div class="setup" id="hist" hidden>
+  <div class="setup-box">
+    <h2>Historial · sala <span id="histSala"></span></h2>
+    <div class="hist-rank" id="ranking"></div>
+    <div class="hist-list" id="histList"></div>
+    <div class="setup-actions">
+      <button class="start" id="histClose">Volver al juego</button>
     </div>
   </div>
 </div>
@@ -1821,6 +1878,7 @@ function renderScores() {
         p.score = Math.round((p.score + delta) * 10) / 10;
         savePlayers();
         renderScores();
+        if (sala) pushScore(p);
       });
       btns.append(b);
     }
@@ -1838,8 +1896,10 @@ function renderChips() {
     chip.type = "button";
     chip.textContent = p.name;
     chip.addEventListener("click", () => {
+      const quitado = players[i].name;
       players.splice(i, 1);
       renderChips();
+      if (sala) borrarJugador(quitado);
     });
     list.append(chip);
   });
@@ -1856,6 +1916,7 @@ function addPlayerFromInput() {
   input.value = "";
   input.focus();
   renderChips();
+  if (sala) pushScore(players[players.length - 1]);
 }
 
 function openSetup() {
@@ -1880,6 +1941,227 @@ document.getElementById("resetScores").addEventListener("click", () => {
 });
 document.getElementById("editPlayers").addEventListener("click", openSetup);
 
+// ——— Sala compartida (Supabase vía REST, sin librerías) ———
+// Rellenar para activar el modo en línea; vacío = juego 100 % local.
+window.ONLINE_CONFIG = window.ONLINE_CONFIG || { url: "", key: "" };
+
+let sala = null;
+let pollTimer = null;
+let pendingWrites = 0;
+let lastLocalChange = 0;
+
+function api(path, opts = {}) {
+  const cfg = window.ONLINE_CONFIG;
+  return fetch(cfg.url + "/rest/v1/" + path, {
+    ...opts,
+    headers: {
+      apikey: cfg.key,
+      Authorization: "Bearer " + cfg.key,
+      "Content-Type": "application/json",
+      ...(opts.headers || {}),
+    },
+  }).then(r => {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.status === 204 ? null : r.json();
+  });
+}
+
+function onlineDisponible() { return Boolean(window.ONLINE_CONFIG.url && window.ONLINE_CONFIG.key); }
+
+function setOnlineState(msg) { document.getElementById("onlineState").textContent = msg; }
+
+function normalizaCodigo(c) {
+  return c.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+}
+
+async function crearSala(codigo) {
+  if (players.length === 0) { setOnlineState("añade jugadores antes de crear"); return; }
+  await api("sala_jugadores", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify(players.map(p => ({ sala: codigo, nombre: p.name, puntos: p.score }))),
+  });
+  entrarEnSala(codigo);
+}
+
+async function unirseSala(codigo) {
+  const rows = await api(`sala_jugadores?sala=eq.${codigo}&select=nombre,puntos&order=nombre`);
+  if (!rows || rows.length === 0) { setOnlineState(`la sala ${codigo} no existe: créala`); return; }
+  players = rows.map(r => ({ name: r.nombre, score: Number(r.puntos) }));
+  entrarEnSala(codigo);
+}
+
+function entrarEnSala(codigo) {
+  sala = codigo;
+  try { localStorage.setItem("trivialMarcadorSala", codigo); } catch (e) {}
+  savePlayers();
+  const badge = document.getElementById("salaBadge");
+  badge.textContent = "SALA " + codigo;
+  badge.hidden = false;
+  setOnlineState(`conectados a ${codigo}`);
+  document.getElementById("endGame").hidden = false;
+  document.getElementById("histBtn").hidden = false;
+  renderChips();
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(sincronizar, 3000);
+}
+
+function salirDeSala() {
+  sala = null;
+  try { localStorage.removeItem("trivialMarcadorSala"); } catch (e) {}
+  document.getElementById("salaBadge").hidden = true;
+  document.getElementById("endGame").hidden = true;
+  document.getElementById("histBtn").hidden = true;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  setOnlineState("modo local");
+}
+
+async function sincronizar() {
+  if (!sala || pendingWrites > 0 || Date.now() - lastLocalChange < 2500) return;
+  if (document.hidden) return;
+  try {
+    const rows = await api(`sala_jugadores?sala=eq.${sala}&select=nombre,puntos&order=nombre`);
+    if (!rows) return;
+    const remoto = rows.map(r => ({ name: r.nombre, score: Number(r.puntos) }));
+    if (JSON.stringify(remoto) !== JSON.stringify([...players].sort((a, b) => a.name.localeCompare(b.name)).map(p => ({ name: p.name, score: p.score })))) {
+      // Conservar el orden local de los que ya existen; añadir nuevos al final
+      const porNombre = new Map(remoto.map(p => [p.name, p.score]));
+      players = players.filter(p => porNombre.has(p.name)).map(p => ({ name: p.name, score: porNombre.get(p.name) }));
+      for (const r of remoto) if (!players.some(p => p.name === r.name)) players.push(r);
+      savePlayers();
+      renderScores();
+    }
+  } catch (e) { /* sin conexión: se reintenta en el siguiente ciclo */ }
+}
+
+async function pushScore(p) {
+  lastLocalChange = Date.now();
+  pendingWrites++;
+  try {
+    await api("sala_jugadores", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates" },
+      body: JSON.stringify([{ sala, nombre: p.name, puntos: p.score }]),
+    });
+  } catch (e) { setOnlineState("sin conexión: reintentando…"); }
+  finally { pendingWrites--; }
+}
+
+async function borrarJugador(nombre) {
+  lastLocalChange = Date.now();
+  pendingWrites++;
+  try { await api(`sala_jugadores?sala=eq.${sala}&nombre=eq.${encodeURIComponent(nombre)}`, { method: "DELETE" }); }
+  catch (e) {}
+  finally { pendingWrites--; }
+}
+
+async function terminarPartida() {
+  if (!sala || players.length === 0) return;
+  const max = Math.max(...players.map(p => p.score));
+  const resultados = players.map(p => ({ nombre: p.name, puntos: p.score, ganador: p.score === max }));
+  try {
+    await api("partidas", { method: "POST", body: JSON.stringify({ sala, resultados }) });
+    for (const p of players) { p.score = 0; await pushScore(p); }
+    savePlayers();
+    renderChips();
+    renderScores();
+    abrirHistorial();
+  } catch (e) { setOnlineState("no se pudo guardar la partida"); }
+}
+
+function fmtFecha(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString("es-ES", { day: "numeric", month: "short" }) + " · " + d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+}
+
+async function abrirHistorial() {
+  document.getElementById("setup").hidden = true;
+  document.getElementById("hist").hidden = false;
+  document.getElementById("histSala").textContent = sala;
+  const rankBox = document.getElementById("ranking");
+  const listBox = document.getElementById("histList");
+  rankBox.textContent = "cargando…";
+  listBox.textContent = "";
+  try {
+    const partidas = await api(`partidas?sala=eq.${sala}&select=fecha,resultados&order=fecha.desc&limit=30`);
+    // Ranking acumulado
+    const acc = new Map();
+    for (const g of partidas) for (const r of g.resultados) {
+      const a = acc.get(r.nombre) || { victorias: 0, puntos: 0 };
+      a.victorias += r.ganador ? 1 : 0;
+      a.puntos += Number(r.puntos);
+      acc.set(r.nombre, a);
+    }
+    rankBox.textContent = "";
+    if (acc.size === 0) {
+      const p = document.createElement("p");
+      p.className = "hist-empty";
+      p.textContent = "Aún no hay partidas terminadas. Al pulsar «Terminar partida» se guarda aquí el resultado.";
+      rankBox.append(p);
+    } else {
+      [...acc.entries()].sort((a, b) => b[1].victorias - a[1].victorias || b[1].puntos - a[1].puntos).forEach(([nombre, a], i) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const izq = document.createElement("span");
+        izq.textContent = (i === 0 ? "👑 " : "") + nombre;
+        const der = document.createElement("span");
+        der.textContent = `${a.victorias} ${a.victorias === 1 ? "victoria" : "victorias"} · ${fmtScore(a.puntos)} pts`;
+        row.append(izq, der);
+        rankBox.append(row);
+      });
+    }
+    for (const g of partidas) {
+      const div = document.createElement("div");
+      div.className = "hist-game";
+      const fecha = document.createElement("span");
+      fecha.className = "fecha";
+      fecha.textContent = fmtFecha(g.fecha);
+      const res = document.createElement("span");
+      res.textContent = [...g.resultados].sort((a, b) => b.puntos - a.puntos)
+        .map(r => `${r.ganador ? "★" : ""}${r.nombre} ${fmtScore(Number(r.puntos))}`).join("  ·  ");
+      div.append(fecha, res);
+      listBox.append(div);
+    }
+  } catch (e) {
+    rankBox.textContent = "";
+    const p = document.createElement("p");
+    p.className = "hist-empty";
+    p.textContent = "No se pudo cargar el historial. Comprueba la conexión.";
+    rankBox.append(p);
+  }
+}
+
+document.getElementById("histClose").addEventListener("click", () => {
+  document.getElementById("hist").hidden = true;
+});
+document.getElementById("histBtn").addEventListener("click", abrirHistorial);
+document.getElementById("endGame").addEventListener("click", terminarPartida);
+document.getElementById("createRoom").addEventListener("click", () => {
+  const c = normalizaCodigo(document.getElementById("roomInput").value);
+  if (c.length >= 3) crearSala(c).catch(() => setOnlineState("error al crear la sala"));
+  else setOnlineState("el código necesita al menos 3 letras");
+});
+document.getElementById("joinRoom").addEventListener("click", () => {
+  const c = normalizaCodigo(document.getElementById("roomInput").value);
+  if (c.length >= 3) unirseSala(c).catch(() => setOnlineState("error al entrar en la sala"));
+  else setOnlineState("el código necesita al menos 3 letras");
+});
+
+function initOnlineUI() {
+  if (!onlineDisponible()) return;
+  document.getElementById("onlineBox").hidden = false;
+  setOnlineState("modo local");
+  let guardada = null;
+  try { guardada = localStorage.getItem("trivialMarcadorSala"); } catch (e) {}
+  if (guardada) {
+    document.getElementById("roomInput").value = guardada;
+    unirseSala(guardada).catch(() => setOnlineState("no se pudo reconectar a " + guardada));
+  }
+}
+
+// Ganchos para pruebas automatizadas
+window._trivial = { crearSala, unirseSala, terminarPartida, sincronizar, initOnlineUI, get players() { return players; }, get sala() { return sala; } };
+
 shuffle(order);
 applyFilter();
 loadPlayers();
@@ -1890,5 +2172,6 @@ if (players.length === 0) {
 } else {
   renderScores();
 }
+initOnlineUI();
 </script>
 </html>
