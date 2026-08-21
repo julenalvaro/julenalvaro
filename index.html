@@ -1943,7 +1943,10 @@ document.getElementById("editPlayers").addEventListener("click", openSetup);
 
 // ——— Sala compartida (Supabase vía REST, sin librerías) ———
 // Rellenar para activar el modo en línea; vacío = juego 100 % local.
-window.ONLINE_CONFIG = window.ONLINE_CONFIG || { url: "", key: "" };
+window.ONLINE_CONFIG = window.ONLINE_CONFIG || {
+  url: "https://bluoouoyqgaaekkndowz.supabase.co",
+  key: "sb_publishable_wxiFvaJlUJ6CbEdrAJc8MA_tNz06MNU",
+};
 
 let sala = null;
 let pollTimer = null;
@@ -1960,9 +1963,10 @@ function api(path, opts = {}) {
       "Content-Type": "application/json",
       ...(opts.headers || {}),
     },
-  }).then(r => {
+  }).then(async r => {
     if (!r.ok) throw new Error("HTTP " + r.status);
-    return r.status === 204 ? null : r.json();
+    const texto = await r.text();
+    return texto ? JSON.parse(texto) : null;
   });
 }
 
