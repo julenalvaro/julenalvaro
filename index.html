@@ -409,6 +409,44 @@
   .pbtns { display: none; }
   body.corrigiendo .pbtns { display: grid; }
   .stats-title { font-weight: 600; margin: 10px 0 0; font-size: 0.95rem; }
+  .plist { display: flex; flex-direction: column; gap: 6px; min-height: 34px; }
+  .prowline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 7px 10px;
+  }
+  .prowline .num { color: var(--ink-soft); font-size: 0.85rem; min-width: 1.3em; }
+  .prowline .nm { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prowline button {
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--ink);
+    border-radius: 8px;
+    padding: 6px 11px;
+    font: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  .prowline button:disabled { opacity: 0.3; cursor: default; }
+  .prowline button.del { color: var(--dep); }
+  .meta-row { display: flex; align-items: center; gap: 8px; font-size: 0.92rem; flex-wrap: wrap; }
+  .meta-row input {
+    width: 72px;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--ink);
+    font: inherit;
+    text-align: center;
+  }
+  .win-box { text-align: center; }
+  .win-box h2 { font-size: 2.6rem; margin: 0; }
+  .win-box p { font-size: 1.15rem; color: var(--ink); }
 </style>
 
 <div class="wrap">
@@ -460,12 +498,13 @@
 <div class="setup" id="setup" hidden>
   <div class="setup-box">
     <h2>¿Quién juega?</h2>
-    <p>Escribe un nombre y pulsa Enter. Toca un nombre para quitarlo.</p>
+    <p>El orden de la lista es el orden de asiento: los turnos van rotando así. Muévelo con las flechas.</p>
     <div class="addrow">
       <input id="nameInput" type="text" maxlength="14" placeholder="Nombre" autocomplete="off">
       <button id="addPlayer">Añadir</button>
     </div>
-    <div class="chiplist" id="chiplist"></div>
+    <div class="plist" id="chiplist"></div>
+    <div class="meta-row">Jugamos a <input id="metaInput" type="number" min="1" step="0.5" inputmode="decimal" placeholder="∞"> puntos <span class="online-state">(vacío = sin límite)</span></div>
     <div class="online" id="onlineBox" hidden>
       <p class="online-title">Sala compartida <span class="online-state" id="onlineState"></span></p>
       <div class="addrow">
@@ -480,6 +519,17 @@
       <button id="resetScores" hidden>Puntos a cero</button>
       <button id="endGame" hidden>Terminar partida</button>
       <button id="histBtn" hidden>Historial</button>
+    </div>
+  </div>
+</div>
+
+<div class="setup" id="win" hidden>
+  <div class="setup-box win-box">
+    <h2>🏆</h2>
+    <p id="winTexto"></p>
+    <div class="setup-actions">
+      <button class="start" id="winGuardar">Guardar y empezar otra</button>
+      <button id="winSeguir">Seguir jugando</button>
     </div>
   </div>
 </div>
@@ -1950,6 +2000,7 @@ function renderScores() {
         savePlayers();
         renderScores();
         if (sala) pushScore(p);
+        checkMeta(p);
       });
       btns.append(b);
     }
@@ -1962,17 +2013,48 @@ function renderChips() {
   const list = document.getElementById("chiplist");
   list.textContent = "";
   players.forEach((p, i) => {
-    const chip = document.createElement("button");
-    chip.className = "chip";
-    chip.type = "button";
-    chip.textContent = p.name;
-    chip.addEventListener("click", () => {
+    const row = document.createElement("div");
+    row.className = "prowline";
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = (i + 1) + ".";
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = p.name;
+    const up = document.createElement("button");
+    up.type = "button";
+    up.textContent = "▲";
+    up.disabled = i === 0;
+    up.setAttribute("aria-label", "Subir a " + p.name);
+    up.addEventListener("click", () => {
+      [players[i - 1], players[i]] = [players[i], players[i - 1]];
+      savePlayers();
+      renderChips();
+    });
+    const down = document.createElement("button");
+    down.type = "button";
+    down.textContent = "▼";
+    down.disabled = i === players.length - 1;
+    down.setAttribute("aria-label", "Bajar a " + p.name);
+    down.addEventListener("click", () => {
+      [players[i], players[i + 1]] = [players[i + 1], players[i]];
+      savePlayers();
+      renderChips();
+    });
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "del";
+    del.textContent = "✕";
+    del.setAttribute("aria-label", "Quitar a " + p.name);
+    del.addEventListener("click", () => {
       const quitado = players[i].name;
       players.splice(i, 1);
+      savePlayers();
       renderChips();
       if (sala) borrarJugador(quitado);
     });
-    list.append(chip);
+    row.append(num, nm, up, down, del);
+    list.append(row);
   });
   document.getElementById("startGame").disabled = players.length === 0;
   document.getElementById("resetScores").hidden = !players.some(p => p.score !== 0);
@@ -2009,6 +2091,7 @@ document.getElementById("nameInput").addEventListener("keydown", e => {
 document.getElementById("startGame").addEventListener("click", closeSetup);
 document.getElementById("resetScores").addEventListener("click", () => {
   players.forEach(p => p.score = 0);
+  metaAvisada = false;
   renderChips();
 });
 document.getElementById("editPlayers").addEventListener("click", openSetup);
@@ -2031,7 +2114,48 @@ function aplicarDelta(p, delta) {
   savePlayers();
   renderScores();
   if (sala) pushScore(p);
+  checkMeta(p);
 }
+
+// ——— Puntuación objetivo ———
+let meta = null;
+let metaAvisada = false;
+try { meta = parseFloat(localStorage.getItem("trivialMarcadorMeta")) || null; } catch (e) {}
+
+function checkMeta(p) {
+  if (!meta || metaAvisada) return;
+  if (p.score >= meta) {
+    metaAvisada = true;
+    document.getElementById("winTexto").textContent = `¡${p.name} llega a ${fmtScore(meta)} y gana la partida!`;
+    document.getElementById("win").hidden = false;
+  }
+}
+
+document.getElementById("metaInput").addEventListener("change", e => {
+  const v = parseFloat(e.target.value);
+  meta = Number.isFinite(v) && v > 0 ? v : null;
+  metaAvisada = false;
+  try {
+    if (meta) localStorage.setItem("trivialMarcadorMeta", String(meta));
+    else localStorage.removeItem("trivialMarcadorMeta");
+  } catch (err) {}
+});
+
+document.getElementById("winSeguir").addEventListener("click", () => {
+  document.getElementById("win").hidden = true;
+});
+
+document.getElementById("winGuardar").addEventListener("click", async () => {
+  document.getElementById("win").hidden = true;
+  metaAvisada = false;
+  if (sala) {
+    await terminarPartida();
+  } else {
+    players.forEach(p => p.score = 0);
+    savePlayers();
+    renderScores();
+  }
+});
 
 function registrarEvento(jugador, resultado, rebote) {
   const ev = {
@@ -2242,6 +2366,7 @@ async function terminarPartida() {
   try {
     await api("partidas", { method: "POST", body: JSON.stringify({ sala, resultados }) });
     for (const p of players) { p.score = 0; await pushScore(p); }
+    metaAvisada = false;
     savePlayers();
     renderChips();
     renderScores();
@@ -2386,6 +2511,7 @@ if (players.length === 0) {
   renderScores();
 }
 actualizarTurnoUI();
+if (meta) document.getElementById("metaInput").value = meta;
 initOnlineUI();
 </script>
 </html>
