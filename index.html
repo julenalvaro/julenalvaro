@@ -352,6 +352,63 @@
   .hist-game .fecha { color: var(--ink-soft); font-size: 0.8rem; }
   .hist-list { display: flex; flex-direction: column; gap: 8px; max-height: 40vh; overflow-y: auto; }
   .hist-empty { color: var(--ink-soft); font-size: 0.9rem; margin: 0; }
+  .turno {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.92rem;
+    color: var(--ink-soft);
+  }
+  .turno b { color: var(--ink); font-size: 1.05rem; }
+  .turno button {
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--ink-soft);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .acciones {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+  .acciones button {
+    padding: 13px 4px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    font: inherit;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .acciones .ok { color: var(--cie); border-color: var(--cie); }
+  .acciones .ko { color: var(--dep); border-color: var(--dep); }
+  .acciones .skip { color: var(--ink-soft); }
+  .rebote {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+  }
+  .rebote button {
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--ink);
+    border-radius: 999px;
+    padding: 8px 16px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .rebote button.nadie { color: var(--ink-soft); }
+  .pbtns { display: none; }
+  body.corrigiendo .pbtns { display: grid; }
+  .stats-title { font-weight: 600; margin: 10px 0 0; font-size: 0.95rem; }
 </style>
 
 <div class="wrap">
@@ -374,8 +431,15 @@
 
   <div class="card" id="card" tabindex="0" role="button" aria-label="Mostrar u ocultar la respuesta">
     <span class="cat" id="cat"></span>
+    <div class="turno" id="turno" hidden>Pregunta para <b id="turnoNombre"></b> <button id="pasarTurno" type="button">cambiar turno</button></div>
     <p class="question" id="question"></p>
     <div class="answer hidden-answer" id="answer">Toca la tarjeta o pulsa «Ver respuesta»</div>
+    <div class="acciones" id="acciones" hidden>
+      <button class="ok" id="accAcierta" type="button">✔ Acierta</button>
+      <button class="ko" id="accFalla" type="button">✘ Falla</button>
+      <button class="skip" id="accPasa" type="button">Pasa</button>
+    </div>
+    <div class="rebote" id="rebote" hidden></div>
   </div>
 
   <div class="controls">
@@ -388,6 +452,7 @@
 
   <div class="footer-row">
     <button id="editPlayers">Jugadores</button>
+    <button id="corregir">Corregir puntos</button>
     <button id="shuffle">Barajar de nuevo</button>
   </div>
 </div>
@@ -408,7 +473,7 @@
         <button id="joinRoom">Entrar</button>
         <button id="createRoom">Crear</button>
       </div>
-      <p class="online-hint">Uno crea la sala y el resto entra con el mismo código: el marcador se sincroniza en todos los móviles.</p>
+      <p class="online-hint">Funciona como un grupo de WhatsApp: uno inventa un nombre de sala y pulsa «Crear»; los demás escriben ese mismo nombre y pulsan «Entrar». Desde entonces todos los móviles ven los mismos puntos, y la app recuerda la sala para la próxima vez.</p>
     </div>
     <div class="setup-actions">
       <button class="start" id="startGame" disabled>Empezar</button>
@@ -423,6 +488,8 @@
   <div class="setup-box">
     <h2>Historial · sala <span id="histSala"></span></h2>
     <div class="hist-rank" id="ranking"></div>
+    <p class="stats-title" id="statsTitle" hidden>Estadísticas</p>
+    <div class="hist-rank" id="statsBox"></div>
     <div class="hist-list" id="histList"></div>
     <div class="setup-actions">
       <button class="start" id="histClose">Volver al juego</button>
@@ -1792,6 +1859,7 @@ function render() {
   }
   document.getElementById("counter").textContent = `${pos + 1} / ${filtered.length}`;
   document.getElementById("reveal").textContent = revealed ? "Ocultar respuesta" : "Ver respuesta";
+  actualizarTurnoUI();
 }
 
 function move(delta) {
@@ -1808,7 +1876,10 @@ function toggleReveal() {
 document.getElementById("prev").addEventListener("click", () => move(-1));
 document.getElementById("next").addEventListener("click", () => move(1));
 document.getElementById("reveal").addEventListener("click", toggleReveal);
-document.getElementById("card").addEventListener("click", toggleReveal);
+document.getElementById("card").addEventListener("click", e => {
+  if (e.target.closest("button")) return;
+  toggleReveal();
+});
 document.getElementById("card").addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); toggleReveal(); }
 });
@@ -1928,6 +1999,7 @@ function closeSetup() {
   document.getElementById("setup").hidden = true;
   savePlayers();
   renderScores();
+  actualizarTurnoUI();
 }
 
 document.getElementById("addPlayer").addEventListener("click", addPlayerFromInput);
@@ -1940,6 +2012,110 @@ document.getElementById("resetScores").addEventListener("click", () => {
   renderChips();
 });
 document.getElementById("editPlayers").addEventListener("click", openSetup);
+
+// ——— Modo por turnos ———
+const PUNTOS = { acierto: 1, fallo: -0.5, pasa: 0, rebote: 0.5 };
+let turnIdx = 0;
+try { turnIdx = parseInt(localStorage.getItem("trivialMarcadorTurno")) || 0; } catch (e) {}
+let eventos = [];
+try { eventos = JSON.parse(localStorage.getItem("trivialMarcadorEventos") || "[]"); } catch (e) {}
+let pendiente = null; // jugada esperando el rebote
+
+function jugadorEnTurno() { return players[turnIdx % players.length]; }
+function guardarTurno() { try { localStorage.setItem("trivialMarcadorTurno", String(turnIdx)); } catch (e) {} }
+function guardarEventos() { try { localStorage.setItem("trivialMarcadorEventos", JSON.stringify(eventos.slice(-2000))); } catch (e) {} }
+
+function aplicarDelta(p, delta) {
+  if (!delta) return;
+  p.score = Math.round((p.score + delta) * 10) / 10;
+  savePlayers();
+  renderScores();
+  if (sala) pushScore(p);
+}
+
+function registrarEvento(jugador, resultado, rebote) {
+  const ev = {
+    fecha: new Date().toISOString(),
+    jugador,
+    categoria: CATS[Q[filtered[pos]][0]].name,
+    resultado,
+    rebote: rebote || null,
+  };
+  eventos.push(ev);
+  guardarEventos();
+  if (sala) {
+    api("eventos", { method: "POST", body: JSON.stringify({ sala, jugador: ev.jugador, categoria: ev.categoria, resultado: ev.resultado, rebote: ev.rebote }) }).catch(() => {});
+  }
+}
+
+function resolver(resultado) {
+  if (players.length === 0) return;
+  const jug = jugadorEnTurno();
+  aplicarDelta(jug, PUNTOS[resultado]);
+  if (resultado === "acierto") {
+    registrarEvento(jug.name, "acierto", null);
+    avanzar();
+  } else {
+    pendiente = { jugador: jug.name, resultado };
+    mostrarRebote(jug.name);
+  }
+}
+
+function mostrarRebote(titular) {
+  const box = document.getElementById("rebote");
+  box.textContent = "";
+  const label = document.createElement("span");
+  label.textContent = `¿Alguien la caza al rebote? (+${fmtScore(PUNTOS.rebote)})`;
+  box.append(label);
+  for (const p of players) {
+    if (p.name === titular) continue;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = p.name;
+    b.addEventListener("click", () => cerrarRebote(p));
+    box.append(b);
+  }
+  const nadie = document.createElement("button");
+  nadie.type = "button";
+  nadie.className = "nadie";
+  nadie.textContent = "Nadie";
+  nadie.addEventListener("click", () => cerrarRebote(null));
+  box.append(nadie);
+  document.getElementById("acciones").hidden = true;
+  box.hidden = false;
+}
+
+function cerrarRebote(p) {
+  if (p) aplicarDelta(p, PUNTOS.rebote);
+  registrarEvento(pendiente.jugador, pendiente.resultado, p ? p.name : null);
+  pendiente = null;
+  avanzar();
+}
+
+function avanzar() {
+  turnIdx++;
+  guardarTurno();
+  document.getElementById("rebote").hidden = true;
+  move(1); // siguiente pregunta: oculta respuesta y refresca el turno
+}
+
+function actualizarTurnoUI() {
+  const hay = players.length > 0;
+  const box = document.getElementById("turno");
+  box.hidden = !hay;
+  if (hay) document.getElementById("turnoNombre").textContent = jugadorEnTurno().name;
+  document.getElementById("acciones").hidden = !(revealed && hay);
+  if (!revealed) { document.getElementById("rebote").hidden = true; pendiente = null; }
+}
+
+document.getElementById("accAcierta").addEventListener("click", () => resolver("acierto"));
+document.getElementById("accFalla").addEventListener("click", () => resolver("fallo"));
+document.getElementById("accPasa").addEventListener("click", () => resolver("pasa"));
+document.getElementById("pasarTurno").addEventListener("click", () => { turnIdx++; guardarTurno(); actualizarTurnoUI(); });
+document.getElementById("corregir").addEventListener("click", () => {
+  const activo = document.body.classList.toggle("corrigiendo");
+  document.getElementById("corregir").textContent = activo ? "Ocultar corrección" : "Corregir puntos";
+});
 
 // ——— Sala compartida (Supabase vía REST, sin librerías) ———
 // Rellenar para activar el modo en línea; vacío = juego 100 % local.
@@ -2114,6 +2290,39 @@ async function abrirHistorial() {
         rankBox.append(row);
       });
     }
+    // Estadísticas por jugador a partir de las jugadas registradas
+    let evs = eventos;
+    try {
+      const remotos = await api(`eventos?sala=eq.${sala}&select=jugador,categoria,resultado,rebote&order=fecha.desc&limit=2000`);
+      if (remotos && remotos.length) evs = remotos;
+    } catch (e) { /* sin tabla o sin conexión: usamos las jugadas locales */ }
+    const statsBox = document.getElementById("statsBox");
+    statsBox.textContent = "";
+    const st = new Map();
+    const dame = n => { if (!st.has(n)) st.set(n, { a: 0, f: 0, p: 0, r: 0, cats: new Map() }); return st.get(n); };
+    for (const e of evs) {
+      const s = dame(e.jugador);
+      if (e.resultado === "acierto") { s.a++; s.cats.set(e.categoria, (s.cats.get(e.categoria) || 0) + 1); }
+      else if (e.resultado === "fallo") s.f++;
+      else s.p++;
+      if (e.rebote) {
+        const rs = dame(e.rebote);
+        rs.r++;
+        rs.cats.set(e.categoria, (rs.cats.get(e.categoria) || 0) + 1);
+      }
+    }
+    document.getElementById("statsTitle").hidden = st.size === 0;
+    for (const [nombre, s] of [...st.entries()].sort((x, y) => (y[1].a + y[1].r) - (x[1].a + x[1].r))) {
+      const mejor = [...s.cats.entries()].sort((x, y) => y[1] - x[1])[0];
+      const row = document.createElement("div");
+      row.className = "row";
+      const izq = document.createElement("span");
+      izq.textContent = nombre;
+      const der = document.createElement("span");
+      der.textContent = `${s.a}✔ ${s.f}✘ · ${s.p} ${s.p === 1 ? "pase" : "pases"} · ${s.r} ${s.r === 1 ? "rebote" : "rebotes"}` + (mejor ? ` · fuerte en ${mejor[0]}` : "");
+      row.append(izq, der);
+      statsBox.append(row);
+    }
     for (const g of partidas) {
       const div = document.createElement("div");
       div.className = "hist-game";
@@ -2176,6 +2385,7 @@ if (players.length === 0) {
 } else {
   renderScores();
 }
+actualizarTurnoUI();
 initOnlineUI();
 </script>
 </html>
